@@ -11,6 +11,8 @@ from app.models import (
     JobRecord,
     Schedule,
     epoch_seconds,
+    status_time_bucket_shard_key,
+    user_status_key,
 )
 
 
@@ -24,7 +26,8 @@ class NotFoundError(RuntimeError):
 
 class DynamoJobStore:
     user_execution_index = "user_execution_time_index"
-    status_index = "status_execution_time_index"
+    user_status_index = "user_status_execution_time_index"
+    status_shard_index = "status_time_bucket_shard_index"
 
     def __init__(self, dynamodb: Any) -> None:
         self.dynamodb = dynamodb
@@ -57,15 +60,16 @@ class DynamoJobStore:
             self.dynamodb.create_table(
                 TableName=settings.dynamodb_executions_table,
                 KeySchema=[
-                    {"AttributeName": "time_bucket", "KeyType": "HASH"},
+                    {"AttributeName": "time_bucket_shard", "KeyType": "HASH"},
                     {"AttributeName": "execution_time_key", "KeyType": "RANGE"},
                 ],
                 AttributeDefinitions=[
-                    {"AttributeName": "time_bucket", "AttributeType": "S"},
+                    {"AttributeName": "time_bucket_shard", "AttributeType": "S"},
                     {"AttributeName": "execution_time_key", "AttributeType": "S"},
                     {"AttributeName": "execution_id", "AttributeType": "S"},
                     {"AttributeName": "user_id", "AttributeType": "S"},
-                    {"AttributeName": "status", "AttributeType": "S"},
+                    {"AttributeName": "user_status", "AttributeType": "S"},
+                    {"AttributeName": "status_time_bucket_shard", "AttributeType": "S"},
                 ],
                 GlobalSecondaryIndexes=[
                     {
@@ -77,9 +81,20 @@ class DynamoJobStore:
                         "Projection": {"ProjectionType": "ALL"},
                     },
                     {
-                        "IndexName": self.status_index,
+                        "IndexName": self.user_status_index,
                         "KeySchema": [
-                            {"AttributeName": "status", "KeyType": "HASH"},
+                            {"AttributeName": "user_status", "KeyType": "HASH"},
+                            {"AttributeName": "execution_time_key", "KeyType": "RANGE"},
+                        ],
+                        "Projection": {"ProjectionType": "ALL"},
+                    },
+                    {
+                        "IndexName": self.status_shard_index,
+                        "KeySchema": [
+                            {
+                                "AttributeName": "status_time_bucket_shard",
+                                "KeyType": "HASH",
+                            },
                             {"AttributeName": "execution_time_key", "KeyType": "RANGE"},
                         ],
                         "Projection": {"ProjectionType": "ALL"},
@@ -102,7 +117,7 @@ class DynamoJobStore:
         self.executions.put_item(
             Item=item,
             ConditionExpression=(
-                "attribute_not_exists(time_bucket) "
+                "attribute_not_exists(time_bucket_shard) "
                 "AND attribute_not_exists(execution_time_key)"
             ),
         )
@@ -140,7 +155,13 @@ class DynamoJobStore:
         start_time: int | None = None,
         end_time: int | None = None,
     ) -> list[ExecutionRecord]:
-        key_condition = Key("user_id").eq(user_id)
+        if status is None:
+            index_name = self.user_execution_index
+            key_condition = Key("user_id").eq(user_id)
+        else:
+            index_name = self.user_status_index
+            key_condition = Key("user_status").eq(user_status_key(user_id, status))
+
         if start_time is not None and end_time is not None:
             key_condition &= Key("execution_time_key").between(
                 f"{start_time:010d}#",
@@ -152,26 +173,43 @@ class DynamoJobStore:
             key_condition &= Key("execution_time_key").lte(f"{end_time:010d}#~")
 
         response = self.executions.query(
-            IndexName=self.user_execution_index,
+            IndexName=index_name,
             KeyConditionExpression=key_condition,
             Limit=limit,
         )
-        executions = [self._item_to_execution(item) for item in response.get("Items", [])]
-        if status is not None:
-            executions = [execution for execution in executions if execution.status == status]
-        return executions
+        return [self._item_to_execution(item) for item in response.get("Items", [])]
 
     def due_executions(self, now: int, window_seconds: int, limit: int = 500) -> list[ExecutionRecord]:
-        response = self.executions.query(
-            IndexName=self.status_index,
-            KeyConditionExpression=Key("status").eq(ExecutionStatus.PENDING.value)
-            & Key("execution_time_key").between(
-                "0000000000#",
-                f"{now + window_seconds:010d}#~",
-            ),
-            Limit=limit,
-        )
-        return [self._item_to_execution(item) for item in response.get("Items", [])]
+        start = max(0, now - settings.scheduler_lookback_seconds)
+        end = now + window_seconds
+        executions: list[ExecutionRecord] = []
+
+        for time_bucket in _time_buckets_between(start, end):
+            for shard_id in range(settings.execution_shard_count):
+                remaining = limit - len(executions)
+                if remaining <= 0:
+                    return sorted(executions, key=lambda execution: execution.scheduled_at)
+
+                response = self.executions.query(
+                    IndexName=self.status_shard_index,
+                    KeyConditionExpression=Key("status_time_bucket_shard").eq(
+                        status_time_bucket_shard_key(
+                            ExecutionStatus.PENDING,
+                            time_bucket,
+                            shard_id,
+                        )
+                    )
+                    & Key("execution_time_key").between(
+                        f"{start:010d}#",
+                        f"{end:010d}#~",
+                    ),
+                    Limit=remaining,
+                )
+                executions.extend(
+                    self._item_to_execution(item) for item in response.get("Items", [])
+                )
+
+        return sorted(executions, key=lambda execution: execution.scheduled_at)
 
     def mark_in_progress(self, execution: ExecutionRecord) -> ExecutionRecord:
         return self._transition(
@@ -217,13 +255,31 @@ class DynamoJobStore:
         values: dict[str, Any] = {
             ":updated_at": now,
             ":new_status": new_status.value,
+            ":status_time_bucket_shard": status_time_bucket_shard_key(
+                new_status,
+                execution.time_bucket,
+                execution.shard_id,
+            ),
+            ":user_status": user_status_key(execution.user_id, new_status),
         }
         allowed_placeholders: list[str] = []
         for index, status in enumerate(allowed_statuses):
             placeholder = f":allowed_{index}"
             values[placeholder] = status.value
             allowed_placeholders.append(placeholder)
-        set_parts = ["#status = :new_status", "updated_at = :updated_at"]
+        names.update(
+            {
+                "#updated_at": "updated_at",
+                "#status_time_bucket_shard": "status_time_bucket_shard",
+                "#user_status": "user_status",
+            }
+        )
+        set_parts = [
+            "#status = :new_status",
+            "#updated_at = :updated_at",
+            "#status_time_bucket_shard = :status_time_bucket_shard",
+            "#user_status = :user_status",
+        ]
 
         for name, value in (extra or {}).items():
             name_placeholder = f"#{name}"
@@ -235,7 +291,7 @@ class DynamoJobStore:
         try:
             response = self.executions.update_item(
                 Key={
-                    "time_bucket": execution.time_bucket,
+                    "time_bucket_shard": execution.time_bucket_shard,
                     "execution_time_key": execution.execution_time_key,
                 },
                 UpdateExpression="SET " + ", ".join(set_parts),
@@ -255,7 +311,11 @@ class DynamoJobStore:
     def _execution_to_item(execution: ExecutionRecord) -> dict[str, Any]:
         item = execution.model_dump(mode="json")
         item["time_bucket"] = execution.time_bucket
+        item["shard_id"] = execution.shard_id
+        item["time_bucket_shard"] = execution.time_bucket_shard
         item["execution_time_key"] = execution.execution_time_key
+        item["status_time_bucket_shard"] = execution.status_time_bucket_shard
+        item["user_status"] = execution.user_status
         return item
 
     @staticmethod
@@ -271,3 +331,9 @@ class DynamoJobStore:
             updated_at=int(item["updated_at"]),
             error=item.get("error"),
         )
+
+
+def _time_buckets_between(start: int, end: int) -> list[str]:
+    first = (start // 3600) * 3600
+    last = (end // 3600) * 3600
+    return [str(bucket) for bucket in range(first, last + 3600, 3600)]

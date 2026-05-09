@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
 from enum import StrEnum
+from hashlib import sha256
 from typing import Any, Literal
 from uuid import uuid4
 
+from app.config import settings
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -67,8 +69,24 @@ class ExecutionRecord(BaseModel):
         return str((self.scheduled_at // 3600) * 3600)
 
     @property
+    def shard_id(self) -> int:
+        return execution_shard_id(self.execution_id)
+
+    @property
+    def time_bucket_shard(self) -> str:
+        return f"{self.time_bucket}#shard_{self.shard_id:02d}"
+
+    @property
     def execution_time_key(self) -> str:
         return f"{self.scheduled_at:010d}#{self.execution_id}"
+
+    @property
+    def status_time_bucket_shard(self) -> str:
+        return status_time_bucket_shard_key(self.status, self.time_bucket, self.shard_id)
+
+    @property
+    def user_status(self) -> str:
+        return user_status_key(self.user_id, self.status)
 
 
 class JobResponse(BaseModel):
@@ -96,3 +114,22 @@ class TaskResult(BaseModel):
 def epoch_seconds(dt: datetime | None = None) -> int:
     value = dt or datetime.now(timezone.utc)
     return int(value.timestamp())
+
+
+def execution_shard_id(execution_id: str) -> int:
+    digest = sha256(execution_id.encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % settings.execution_shard_count
+
+
+def status_time_bucket_shard_key(
+    status: ExecutionStatus | str,
+    time_bucket: str,
+    shard_id: int,
+) -> str:
+    status_value = status.value if isinstance(status, ExecutionStatus) else status
+    return f"{status_value}#{time_bucket}#shard_{shard_id:02d}"
+
+
+def user_status_key(user_id: str, status: ExecutionStatus | str) -> str:
+    status_value = status.value if isinstance(status, ExecutionStatus) else status
+    return f"{user_id}#{status_value}"
