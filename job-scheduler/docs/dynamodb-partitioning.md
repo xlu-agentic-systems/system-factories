@@ -110,6 +110,42 @@ DynamoDB does not append the suffix. The application writes the final partition 
 
 In the sharded design, we cannot efficiently query only `time_bucket = 1715547600` unless we add a separate index, which would recreate the hot-key problem.
 
+The reason is DynamoDB `Query` only works against the key schema of the table or one of its indexes. In this table, the key schema is:
+
+```text
+PK = time_bucket_shard
+SK = execution_time_key
+```
+
+So this key condition is valid:
+
+```python
+Key("time_bucket_shard").eq("1715547600#shard_03")
+```
+
+But this is not a valid key condition for the table:
+
+```python
+Key("time_bucket").eq("1715547600")
+```
+
+`time_bucket` is stored on the item for debugging and observability, but it is not the table partition key. DynamoDB does not automatically index every item attribute.
+
+To query by `time_bucket`, we would need a GSI like:
+
+```text
+GSI_PK = time_bucket
+GSI_SK = execution_time_key
+```
+
+That GSI would put every execution for the same hour under one GSI partition key:
+
+```text
+1715547600
+```
+
+This recreates the same hot-key problem on the GSI, so the scheduler does not use this access pattern.
+
 Instead, the backend fans out over the known shard suffixes.
 
 Example with `execution_shard_count = 4`:
