@@ -15,6 +15,8 @@ This is a Python implementation of the job scheduler design. It includes the hig
 
 ## Core Data Model
 
+For more detail on DynamoDB logical shards, physical partitions, and scheduler query fanout, see [docs/dynamodb-partitioning.md](docs/dynamodb-partitioning.md).
+
 `Jobs` stores reusable job definitions:
 
 ```json
