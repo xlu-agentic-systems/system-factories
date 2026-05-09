@@ -9,6 +9,7 @@ from app.models import (
     ScheduleType,
 )
 from app.service import JobSchedulerService
+from app.storage import DynamoJobStore, _time_buckets_between
 
 
 class FakeStore:
@@ -122,3 +123,26 @@ def test_completed_cron_job_creates_next_execution() -> None:
     assert next_execution.execution_id in store.executions
     assert next_execution.scheduled_at > completed.scheduled_at
     assert next_execution.status == ExecutionStatus.PENDING
+
+
+def test_execution_item_includes_shard_and_gsi_keys() -> None:
+    execution = ExecutionRecord(
+        execution_id="execution_123",
+        job_id="job_123",
+        user_id="user_123",
+        scheduled_at=1_700_000_000,
+    )
+
+    item = DynamoJobStore._execution_to_item(execution)
+
+    assert item["time_bucket"] == "1699999200"
+    assert item["time_bucket_shard"].startswith("1699999200#shard_")
+    assert item["status_time_bucket_shard"].startswith("PENDING#1699999200#shard_")
+    assert item["user_status"] == "user_123#PENDING"
+
+
+def test_time_bucket_range_crosses_hour_boundary() -> None:
+    assert _time_buckets_between(1_700_003_590, 1_700_006_401) == [
+        "1700002800",
+        "1700006400",
+    ]

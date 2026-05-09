@@ -18,6 +18,7 @@ async def main() -> None:
     queue = RedisDelayQueue.from_settings()
     store.create_tables()
     queue.redis.delete(queue.key)
+    queue.redis.delete(queue.processing_key)
 
     service = JobSchedulerService(store=store, queue=queue)
     user_id = f"smoke_{uuid4().hex}"

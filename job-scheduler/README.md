@@ -1,14 +1,16 @@
 # Job Scheduler MVP
 
-This is a Python implementation of the high-level job scheduler design. It intentionally stops before the deep-dive scaling work: there is no write sharding, no distributed lock service, no SQS/Kafka layer, and no cancellation/rescheduling API.
+This is a Python implementation of the job scheduler design. It includes the high-level API/data flow and the first deep-dive pieces for local execution: DynamoDB write sharding, GSIs for scheduler/user access patterns, Redis sorted-set delay queues, retries, and Redis visibility leases. It does not use AWS SQS; Redis provides the local queue semantics.
 
 ## What It Implements
 
 - Users can create jobs that run immediately, at a specific datetime, or on a cron schedule.
 - DynamoDB stores durable job definitions and execution instances.
-- Redis sorted sets act as the near-term delay queue, scored by due time.
-- A scheduler process looks ahead for pending executions and puts them into Redis.
-- A worker process claims due executions, runs the registered task, updates status, retries visible failures, and creates the next execution for recurring cron jobs.
+- DynamoDB execution writes are spread across `time_bucket#shard_N` partition keys.
+- DynamoDB GSIs support user monitoring, user+status monitoring, pending scheduler scans, and execution lookup by ID.
+- Redis sorted sets act as the near-term delay queue and processing lease queue, scored by due time or lease expiry.
+- A scheduler process looks ahead for pending executions across bucket shards and puts them into Redis.
+- A worker process claims due executions, heartbeats Redis visibility leases, runs the registered task, updates status, retries visible failures, recovers expired leases, and creates the next execution for recurring cron jobs.
 - Users can query execution status by `user_id`.
 
 ## Core Data Model
@@ -29,8 +31,12 @@ This is a Python implementation of the high-level job scheduler design. It inten
 
 ```json
 {
-  "time_bucket": "1715547600",
+  "time_bucket_shard": "1715547600#shard_03",
   "execution_time_key": "1715548800#execution_uuid",
+  "time_bucket": "1715547600",
+  "shard_id": 3,
+  "status_time_bucket_shard": "PENDING#1715547600#shard_03",
+  "user_status": "user_123#PENDING",
   "execution_id": "execution_uuid",
   "job_id": "job_uuid",
   "user_id": "user_123",
@@ -39,6 +45,16 @@ This is a Python implementation of the high-level job scheduler design. It inten
   "attempt": 0
 }
 ```
+
+Execution table indexes:
+
+- Primary key: `time_bucket_shard`, `execution_time_key`
+- `user_execution_time_index`: `user_id`, `execution_time_key`
+- `user_status_execution_time_index`: `user_status`, `execution_time_key`
+- `status_time_bucket_shard_index`: `status_time_bucket_shard`, `execution_time_key`
+- `execution_id_index`: `execution_id`
+
+The scheduler queries `status_time_bucket_shard_index` for each shard in the lookahead window. This avoids concentrating all pending execution reads/writes into one hourly partition.
 
 ## Local Run
 
