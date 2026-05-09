@@ -1,6 +1,6 @@
 import json
 
-from redis import Redis
+from redis import BlockingConnectionPool, Redis
 
 from app.config import settings
 from app.models import QueuedExecution
@@ -19,7 +19,13 @@ class RedisDelayQueue:
 
     @classmethod
     def from_settings(cls) -> "RedisDelayQueue":
-        return cls(Redis.from_url(settings.redis_url, decode_responses=True))
+        pool = BlockingConnectionPool.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            max_connections=settings.redis_max_connections,
+            timeout=10,
+        )
+        return cls(Redis(connection_pool=pool))
 
     def enqueue(self, item: QueuedExecution) -> None:
         score = item.due_at or item.scheduled_at

@@ -2,6 +2,7 @@ from typing import Any
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from app.config import settings
@@ -42,6 +43,7 @@ class DynamoJobStore:
             endpoint_url=settings.dynamodb_endpoint_url,
             aws_access_key_id="local",
             aws_secret_access_key="local",
+            config=Config(max_pool_connections=settings.aws_max_pool_connections),
         )
         return cls(dynamodb)
 
