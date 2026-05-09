@@ -1,0 +1,9 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+boto3==1.35.90
+redis==5.2.1
+pydantic==2.10.4
+pydantic-settings==2.7.1
+croniter==5.0.1
+python-dateutil==2.9.0.post0
+pytest==8.3.4
