@@ -103,7 +103,7 @@ class Worker:
         heartbeat.cancel()
         self.queue.ack(item)
         self.service.create_next_recurring_execution(completed)
-        logger.info(
+        logger.debug(
             "execution completed",
             extra={"execution_id": completed.execution_id, "job_id": completed.job_id},
         )

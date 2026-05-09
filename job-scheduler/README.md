@@ -15,8 +15,6 @@ This is a Python implementation of the job scheduler design. It includes the hig
 
 ## Core Data Model
 
-For more detail on DynamoDB logical shards, physical partitions, and scheduler query fanout, see [docs/dynamodb-partitioning.md](docs/dynamodb-partitioning.md).
-
 `Jobs` stores reusable job definitions:
 
 ```json
@@ -98,6 +96,14 @@ Run verification:
 pytest -q
 python scripts/smoke.py
 ```
+
+Run a local stress test:
+
+```bash
+python scripts/stress.py --jobs 10000 --create-concurrency 128 --process-concurrency 128 --pop-batch-size 1000
+```
+
+This measures local implementation throughput against DynamoDB Local and Redis. It does not represent AWS DynamoDB partition throughput.
 
 ## Example Requests
 

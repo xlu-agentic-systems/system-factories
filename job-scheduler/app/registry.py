@@ -38,6 +38,11 @@ async def print_message(parameters: dict[str, Any]) -> TaskResult:
     return TaskResult(output={"printed": parameters.get("message")})
 
 
+async def noop(parameters: dict[str, Any]) -> TaskResult:
+    return TaskResult(output={"received": len(parameters)})
+
+
 registry = TaskRegistry()
 registry.register("send_email", send_email)
 registry.register("print_message", print_message)
+registry.register("noop", noop)
