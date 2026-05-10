@@ -1,0 +1,2 @@
+"""Ads click aggregation service."""
+
