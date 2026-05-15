@@ -43,44 +43,49 @@ class LocalAppLockBackend:
             return True
 
 
-class DbTtlLeaseBackend:
-    """A durable lease table guarded by SQLite write locking."""
+class DbStateAppTtlBackend:
+    """DB state is the lock; the app owns timeout scheduling."""
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
-        _init_db_lease_table(self.db_path)
+        self._timers: list[threading.Timer] = []
+        _init_db_state_table(self.db_path)
 
     def acquire(self, resource_id: str, owner_id: str, ttl_seconds: float) -> Lease | None:
-        now = time.time()
-        expires_at = now + ttl_seconds
         token = _token(owner_id)
         conn = connect(self.db_path)
         try:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
-                SELECT owner_id, token, expires_at
-                FROM db_leases
+                SELECT state, owner_id, token
+                FROM db_state_locks
                 WHERE resource_id = ?
                 """,
                 (resource_id,),
             ).fetchone()
-            if row is not None and float(row["expires_at"]) > now:
+            if row is not None and row["state"] != "FREE":
                 conn.execute("ROLLBACK")
                 return None
-            conn.execute(
+            cursor = conn.execute(
                 """
-                INSERT INTO db_leases (resource_id, owner_id, token, expires_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO db_state_locks (resource_id, state, owner_id, token)
+                VALUES (?, 'PENDING', ?, ?)
                 ON CONFLICT(resource_id) DO UPDATE SET
+                    state = 'PENDING',
                     owner_id = excluded.owner_id,
-                    token = excluded.token,
-                    expires_at = excluded.expires_at
+                    token = excluded.token
+                WHERE db_state_locks.state = 'FREE'
                 """,
-                (resource_id, owner_id, token, expires_at),
+                (resource_id, owner_id, token),
             )
+            if cursor.rowcount != 1:
+                conn.execute("ROLLBACK")
+                return None
             conn.execute("COMMIT")
-            return Lease(resource_id, owner_id, token, expires_at)
+            lease = Lease(resource_id, owner_id, token, None)
+            self._schedule_pending_timeout(lease, ttl_seconds)
+            return lease
         except sqlite3.Error:
             _rollback_quietly(conn)
             raise
@@ -91,13 +96,30 @@ class DbTtlLeaseBackend:
         with connect(self.db_path) as conn:
             cursor = conn.execute(
                 """
-                DELETE FROM db_leases
+                UPDATE db_state_locks
+                SET state = 'FREE',
+                    owner_id = NULL,
+                    token = NULL
                 WHERE resource_id = ?
+                  AND state = 'PENDING'
                   AND token = ?
                 """,
                 (lease.resource_id, lease.token),
             )
         return cursor.rowcount == 1
+
+    def _schedule_pending_timeout(self, lease: Lease, ttl_seconds: float) -> None:
+        timer = threading.Timer(ttl_seconds, self.release, args=(lease,))
+        timer.daemon = True
+        timer.start()
+        self._timers.append(timer)
+
+
+class DbStateNoTimerBackend(DbStateAppTtlBackend):
+    """Simulates a service crash after PENDING is written but before the app timer runs."""
+
+    def _schedule_pending_timeout(self, lease: Lease, ttl_seconds: float) -> None:
+        del lease, ttl_seconds
 
 
 class RedisTtlLeaseBackend:
@@ -234,17 +256,17 @@ class RedisServerTtlStore(RedisTtlStore):
         return bool(self.client.eval(script, 1, key, value))
 
 
-def _init_db_lease_table(db_path: Path) -> None:
+def _init_db_state_table(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(
             """
-            CREATE TABLE IF NOT EXISTS db_leases (
+            CREATE TABLE IF NOT EXISTS db_state_locks (
                 resource_id TEXT PRIMARY KEY,
-                owner_id TEXT NOT NULL,
-                token TEXT NOT NULL,
-                expires_at REAL NOT NULL
+                state TEXT NOT NULL CHECK (state IN ('FREE', 'PENDING', 'BUSY')),
+                owner_id TEXT,
+                token TEXT
             );
             """
         )

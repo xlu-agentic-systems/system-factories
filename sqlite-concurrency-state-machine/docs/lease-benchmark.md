@@ -8,17 +8,26 @@ This benchmark compares three ways to protect one hot resource under concurrent 
 
 `app-lock` uses a process-local in-memory lock table. It can protect threads inside one service process, but it is not shared across service instances. In process mode, every process has its own lock table, so every process can believe it owns the same resource.
 
-Crash behavior is also weak. If the process keeps running but the worker dies without releasing the lock, the resource is stuck. If the whole process restarts, the lock disappears, but that means ownership state was never durable.
+Crash behavior is weak. If the process keeps running but the worker dies without releasing the lock, the resource is stuck. If the whole process restarts, the lock disappears, but that means ownership state was never durable.
 
-### DB TTL Lease
+### DB State Lock With App TTL
 
-`db-ttl` stores a lease row in SQLite:
+`db-state-app-ttl` stores the authoritative lock state in SQLite:
 
 ```text
-resource_id, owner_id, token, expires_at
+resource_id, state, owner_id, token
 ```
 
-The acquisition path runs under `BEGIN IMMEDIATE`, checks whether the existing lease is expired, and replaces it only when it is missing or expired. If an owner crashes, the row remains until `expires_at`, then another worker can acquire it.
+The state machine is:
+
+```text
+FREE -> PENDING -> BUSY
+FREE <- PENDING   when the app-side timer fires
+```
+
+The database does not store `expires_at` for this strategy. The acquisition path runs under `BEGIN IMMEDIATE` and atomically transitions `FREE -> PENDING`. The app then starts a 15 second timer. If the timer fires and the row is still `PENDING` with the same token, the app transitions it back to `FREE`.
+
+This is different from a DB TTL lease. The DB is the consistency point for the state transition, but the TTL lives in app memory. If the worker crashes while the service process stays alive, the timer can release `PENDING`. If the service process crashes before the timer fires, the timer is lost and the DB row can remain stuck in `PENDING` unless another recovery path exists.
 
 ### Redis TTL Lease
 
@@ -72,19 +81,20 @@ python3 scripts/run_lease_benchmark.py --workers 12 --ttl 2 --mode both --strate
 
 ```text
 Contention
-strategy    mode        workers  winners  duplicate_winners  elapsed_ms
-----------  ----------  -------  -------  -----------------  ----------
-app-lock    threads          12        1  False                   205.0
-app-lock    processes        12       12  True                    260.0
-db-ttl      processes        12        1  False                   300.0
-redis-ttl   processes        12        1  False                   290.0
+strategy          mode        workers  winners  duplicate_winners  elapsed_ms
+----------------  ----------  -------  -------  -----------------  ----------
+app-lock          threads          12        1  False                   205.0
+app-lock          processes        12       12  True                    260.0
+db-state-app-ttl  processes        12        1  False                   300.0
+redis-ttl         processes        12        1  False                   290.0
 
 Crash Recovery
-strategy    first  before_ttl  after_ttl  recovered  restart_loses_state
-----------  -----  ----------  ---------  ---------  -------------------
-app-lock    True   False       False      False      True
-db-ttl      True   False       True       True       False
-redis-ttl   True   False       True       True       False
+strategy          first  before_ttl  after_ttl  app_timer  service_crash  restart_loses_state
+----------------  -----  ----------  ---------  ---------  -------------  -------------------
+app-lock          True   False       False      False      True           True
+db-state-app-ttl  True   False       True       True       False          False
+redis-ttl         True   False       True       True       True           False
 ```
 
-The robust choices are the shared TTL strategies. The DB TTL lease is strongly consistent with the database and is easy to reason about. Redis TTL is fast and recovers from crashes automatically, but production systems also need careful TTL sizing, renewal, fencing tokens for side effects, and token-checked release.
+The DB state strategy is concurrency-safe because the database serializes `FREE -> PENDING`, but app-owned TTL is not service-crash-safe by itself. Redis TTL is the most robust of these three for crash recovery because expiration is owned by the external store, not by the app process. Production Redis locking still needs careful TTL sizing, renewal, fencing tokens for side effects, and token-checked release.
+

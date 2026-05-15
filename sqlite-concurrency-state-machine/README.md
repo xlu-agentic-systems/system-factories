@@ -21,7 +21,7 @@ The demo uses a local SQLite database as the shared consistency point. Every wor
 app/db.py              SQLite schema and connection helpers
 app/claims.py          unsafe, transactional, and atomic claim implementations
 app/experiment.py      thread/process race runner
-app/lease_backends.py  app lock, DB TTL lease, and Redis TTL lease backends
+app/lease_backends.py  app lock, DB state/app TTL, and Redis TTL backends
 app/lease_benchmark.py contention and crash-recovery benchmark runner
 scripts/run_experiment.py
 scripts/run_lease_benchmark.py

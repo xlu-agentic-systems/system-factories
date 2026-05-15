@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Iterable
 
 from app.lease_backends import (
-    DbTtlLeaseBackend,
+    DbStateAppTtlBackend,
+    DbStateNoTimerBackend,
     InMemoryRedisTtlStore,
     Lease,
     LocalAppLockBackend,
@@ -19,7 +20,7 @@ from app.lease_backends import (
     SqliteRedisTtlStore,
 )
 
-LEASE_STRATEGIES = {"app-lock", "db-ttl", "redis-ttl"}
+LEASE_STRATEGIES = {"app-lock", "db-state-app-ttl", "redis-ttl"}
 
 
 @dataclass(frozen=True)
@@ -51,7 +52,8 @@ class CrashRecoveryResult:
     first_acquired: bool
     before_ttl_acquired: bool
     after_ttl_acquired: bool
-    recovered_after_ttl: bool
+    app_timer_recovered: bool
+    service_crash_recovered: bool
     restart_loses_state: bool
 
 
@@ -109,16 +111,41 @@ def run_crash_recovery(
         raise ValueError(f"unknown strategy {strategy!r}; expected one of {sorted(LEASE_STRATEGIES)}")
 
     resource = resource_id or f"driver-{time.time_ns()}"
-    backend = _make_thread_backend(Path(base_path), strategy, redis_url)
+    base = Path(base_path)
+    backend = _make_thread_backend(base, strategy, redis_url)
     first = backend.acquire(resource, "owner-crashes", ttl_seconds)
     before_ttl = backend.acquire(resource, "owner-before-ttl", ttl_seconds)
     time.sleep(ttl_seconds + min(0.05, max(ttl_seconds / 4, 0.001)))
     after_ttl = backend.acquire(resource, "owner-after-ttl", ttl_seconds)
 
     restart_loses_state = False
+    service_crash_recovered = after_ttl is not None
     if strategy == "app-lock":
         restarted_backend = LocalAppLockBackend()
         restart_loses_state = restarted_backend.acquire(resource, "owner-after-process-restart", ttl_seconds) is not None
+        service_crash_recovered = restart_loses_state
+    elif strategy == "db-state-app-ttl":
+        crashed_resource = f"{resource}-service-crash"
+        crashed_backend = DbStateNoTimerBackend(base / "db-state-app-ttl-service-crash.sqlite3")
+        crashed_backend.acquire(crashed_resource, "owner-service-crashes", ttl_seconds)
+        time.sleep(ttl_seconds + min(0.05, max(ttl_seconds / 4, 0.001)))
+        restarted_backend = DbStateAppTtlBackend(base / "db-state-app-ttl-service-crash.sqlite3")
+        service_crash_recovered = restarted_backend.acquire(
+            crashed_resource,
+            "owner-after-service-restart",
+            ttl_seconds,
+        ) is not None
+    elif strategy == "redis-ttl":
+        crashed_resource = f"{resource}-service-crash"
+        crashed_backend = _make_thread_backend(base, strategy, redis_url)
+        crashed_backend.acquire(crashed_resource, "owner-service-crashes", ttl_seconds)
+        time.sleep(ttl_seconds + min(0.05, max(ttl_seconds / 4, 0.001)))
+        restarted_backend = _make_thread_backend(base, strategy, redis_url)
+        service_crash_recovered = restarted_backend.acquire(
+            crashed_resource,
+            "owner-after-service-restart",
+            ttl_seconds,
+        ) is not None
 
     return CrashRecoveryResult(
         strategy=strategy,
@@ -126,19 +153,20 @@ def run_crash_recovery(
         first_acquired=first is not None,
         before_ttl_acquired=before_ttl is not None,
         after_ttl_acquired=after_ttl is not None,
-        recovered_after_ttl=after_ttl is not None,
+        app_timer_recovered=after_ttl is not None,
+        service_crash_recovered=service_crash_recovered,
         restart_loses_state=restart_loses_state,
     )
 
 
 def summarize_contention(results: Iterable[LeaseContentionResult]) -> str:
     lines = [
-        "strategy    mode        workers  winners  duplicate_winners  elapsed_ms",
-        "----------  ----------  -------  -------  -----------------  ----------",
+        "strategy          mode        workers  winners  duplicate_winners  elapsed_ms",
+        "----------------  ----------  -------  -------  -----------------  ----------",
     ]
     for result in results:
         lines.append(
-            f"{result.strategy:<10}  "
+            f"{result.strategy:<16}  "
             f"{result.mode:<10}  "
             f"{result.workers:>7}  "
             f"{result.winners:>7}  "
@@ -150,16 +178,17 @@ def summarize_contention(results: Iterable[LeaseContentionResult]) -> str:
 
 def summarize_crash(results: Iterable[CrashRecoveryResult]) -> str:
     lines = [
-        "strategy    first  before_ttl  after_ttl  recovered  restart_loses_state",
-        "----------  -----  ----------  ---------  ---------  -------------------",
+        "strategy          first  before_ttl  after_ttl  app_timer  service_crash  restart_loses_state",
+        "----------------  -----  ----------  ---------  ---------  -------------  -------------------",
     ]
     for result in results:
         lines.append(
-            f"{result.strategy:<10}  "
+            f"{result.strategy:<16}  "
             f"{str(result.first_acquired):<5}  "
             f"{str(result.before_ttl_acquired):<10}  "
             f"{str(result.after_ttl_acquired):<9}  "
-            f"{str(result.recovered_after_ttl):<9}  "
+            f"{str(result.app_timer_recovered):<9}  "
+            f"{str(result.service_crash_recovered):<13}  "
             f"{str(result.restart_loses_state):<19}"
         )
     return "\n".join(lines)
@@ -252,8 +281,8 @@ def _attempt_process_leases(args: list[tuple[str, str, str, str, str, float, flo
 def _make_thread_backend(base_path: Path, strategy: str, redis_url: str | None = None):
     if strategy == "app-lock":
         return LocalAppLockBackend()
-    if strategy == "db-ttl":
-        return DbTtlLeaseBackend(base_path / "db-ttl-leases.sqlite3")
+    if strategy == "db-state-app-ttl":
+        return DbStateAppTtlBackend(base_path / "db-state-app-ttl.sqlite3")
     if strategy == "redis-ttl":
         if redis_url is not None:
             return RedisTtlLeaseBackend(RedisServerTtlStore(redis_url))
@@ -264,8 +293,8 @@ def _make_thread_backend(base_path: Path, strategy: str, redis_url: str | None =
 def _make_process_backend(base_path: Path, strategy: str, redis_url: str | None = None):
     if strategy == "app-lock":
         return LocalAppLockBackend()
-    if strategy == "db-ttl":
-        return DbTtlLeaseBackend(base_path / "db-ttl-leases.sqlite3")
+    if strategy == "db-state-app-ttl":
+        return DbStateAppTtlBackend(base_path / "db-state-app-ttl.sqlite3")
     if strategy == "redis-ttl":
         if redis_url is not None:
             return RedisTtlLeaseBackend(RedisServerTtlStore(redis_url))
