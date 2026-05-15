@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.benchmark import BenchmarkResult, format_results
+from app.lock_simulator import run_lock_simulation
 from app.workload import generate_operations, post_ids
 
 
@@ -47,3 +48,11 @@ def test_format_results_includes_modes():
 
     assert "hot" in format_results([result])
 
+
+def test_lock_simulator_makes_hot_row_contention_visible():
+    hot = run_lock_simulation(mode="hot", operations=200, posts=50, workers=50, update_ms=1.0)
+    distributed = run_lock_simulation(mode="distributed", operations=200, posts=50, workers=50, update_ms=1.0)
+
+    assert hot.hottest_post_count == 200
+    assert distributed.hottest_post_count == 4
+    assert distributed.throughput_ops_s > hot.throughput_ops_s * 5

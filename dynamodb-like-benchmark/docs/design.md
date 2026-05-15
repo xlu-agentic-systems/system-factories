@@ -59,3 +59,13 @@ How much worse does one hot counter item look than spreading the same writes acr
 
 It does not measure AWS partition throughput limits directly.
 
+## Row-Lock Simulator
+
+`scripts/run_lock_sim.py` exists to isolate the exact locking intuition:
+
+```text
+same post counter -> same lock -> serialized
+many post counters -> many locks -> parallel
+```
+
+This is not a DynamoDB implementation. It is a controlled single-node model of counter-row/item locking. Use it to demonstrate why the hot-key shape is fundamentally different from distributed writes even when total write count is identical.
