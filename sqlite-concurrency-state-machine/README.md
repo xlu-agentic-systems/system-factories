@@ -21,11 +21,16 @@ The demo uses a local SQLite database as the shared consistency point. Every wor
 app/db.py              SQLite schema and connection helpers
 app/claims.py          unsafe, transactional, and atomic claim implementations
 app/experiment.py      thread/process race runner
+app/lease_backends.py  app lock, DB TTL lease, and Redis TTL lease backends
+app/lease_benchmark.py contention and crash-recovery benchmark runner
 scripts/run_experiment.py
+scripts/run_lease_benchmark.py
 tests/test_concurrency.py
+tests/test_lease_benchmark.py
 ```
 
 For a focused explanation of the concurrency-control patterns, see [docs/concurrency-control.md](docs/concurrency-control.md).
+For the lease benchmark and Redis TTL explanation, see [docs/lease-benchmark.md](docs/lease-benchmark.md).
 
 ## Run It
 
@@ -41,6 +46,12 @@ Run the experiment:
 
 ```bash
 python3 scripts/run_experiment.py --workers 32 --mode both --strategy all
+```
+
+Run the lease benchmark:
+
+```bash
+python3 scripts/run_lease_benchmark.py --workers 32 --ttl 15 --mode both --strategy all
 ```
 
 Example output shape:
