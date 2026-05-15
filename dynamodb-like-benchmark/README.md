@@ -75,6 +75,12 @@ Run a local benchmark:
 python3 scripts/run_benchmark.py --operations 10000 --posts 1000 --workers 128 --mode all
 ```
 
+Run the local row-lock simulator that isolates same-row contention:
+
+```bash
+python3 scripts/run_lock_sim.py --operations 10000 --posts 1000 --workers 128 --update-ms 1 --mode all
+```
+
 Run a larger local benchmark:
 
 ```bash
@@ -101,6 +107,20 @@ PostCounters[post-2]
 ...
 PostCounters[post-N]
 ```
+
+## Local Row-Lock Simulator
+
+DynamoDB Local is useful as a baseline, but it does not strongly expose AWS-style hot item/partition behavior. The row-lock simulator makes the locking model explicit:
+
+```text
+hot:
+  every counter update takes the same post lock
+
+distributed:
+  counter updates take different post locks and can run in parallel
+```
+
+`--update-ms` controls how long a counter update spends while holding the lock. With `--update-ms 1`, one hot row can process at most roughly 1,000 updates/sec no matter how many clients are waiting. Distributed rows can use many locks in parallel.
 
 ## Production Direction
 

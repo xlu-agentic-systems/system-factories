@@ -51,3 +51,21 @@ Useful follow-ups:
 - Duplicate/retry workloads using idempotency.
 - Unlike-heavy workloads.
 
+## Row-Lock Simulator Result
+
+Command:
+
+```bash
+python3 scripts/run_lock_sim.py --operations 10000 --posts 1000 --workers 128 --update-ms 1 --mode all
+```
+
+Result:
+
+```text
+mode         ops      posts  workers  update_ms  ops/s     avg_ms  p95_ms   p99_ms   hottest_post
+-----------  -------  -----  -------  ---------  --------  ------  -------  -------  ------------
+hot            10000   1000      128       1.00     775.9  163.79   652.85   980.20         10000
+distributed    10000   1000      128       1.00   59947.4    1.84     6.60    13.21            10
+```
+
+This makes the intended contention effect visible. The hot workload is bounded by one lock, while the distributed workload can run across many independent locks.

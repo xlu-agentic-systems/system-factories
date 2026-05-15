@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 
@@ -24,6 +25,7 @@ class LikeStore:
         self,
         endpoint_url: str = "http://127.0.0.1:58000",
         region_name: str = "us-east-1",
+        max_pool_connections: int = 256,
     ) -> None:
         self.resource = boto3.resource(
             "dynamodb",
@@ -31,6 +33,7 @@ class LikeStore:
             region_name=region_name,
             aws_access_key_id="local",
             aws_secret_access_key="local",
+            config=Config(max_pool_connections=max_pool_connections),
         )
         self.client = self.resource.meta.client
         self.likes = self.resource.Table("Likes")
@@ -141,4 +144,3 @@ def _result(
         reason=reason,
         elapsed_ms=(time.perf_counter() - started) * 1000,
     )
-
