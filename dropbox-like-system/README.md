@@ -4,6 +4,7 @@ Milestone 1 implements the basic file API:
 
 - `POST /file` uploads one new file.
 - `GET /file/{file_id}` downloads a previously uploaded file.
+- A local device agent watches a Dropbox folder and uploads created/modified files.
 
 The implementation uses FastAPI, SQLite metadata, and a local content-addressed object store on disk. The local object store can later be swapped for S3, MinIO, GCS, or another object store because metadata stores only an immutable object key.
 
@@ -93,6 +94,41 @@ For this milestone, the local object store is a content-addressed directory unde
 - the configured upload limit.
 
 There is no S3-style service limit in this implementation. For S3-compatible local testing, MinIO is the right next step; it can run in Docker and exposes the same style of object API a production deployment would use. Its usable capacity is still the disk/volume size you attach to the container.
+
+## Device Agent
+
+Detailed design notes are in [docs/device-agent.md](docs/device-agent.md).
+
+Each device keeps a local Dropbox folder. The local agent daemon watches that folder through OS file events using `watchdog`:
+
+```text
+local Dropbox folder
+  -> OS create/modify/move event
+  -> device agent debounce/stability check
+  -> SHA-256 snapshot
+  -> POST /file
+  -> local sync state update
+```
+
+The agent stores per-device sync state in SQLite so unchanged files are not reuploaded. Temporary, hidden, and partial-download files are ignored.
+
+Run the API server:
+
+```bash
+uvicorn app.api:app --host 127.0.0.1 --port 8080 --reload
+```
+
+Run a device agent:
+
+```bash
+python scripts/device_agent.py \
+  --folder ~/DropboxLocal \
+  --api-base-url http://127.0.0.1:8080 \
+  --state-db data/device-agent.sqlite3 \
+  --scan-on-start
+```
+
+Create or edit a file under `~/DropboxLocal`; the agent detects the OS event and uploads it through the current API.
 
 ## Run
 
