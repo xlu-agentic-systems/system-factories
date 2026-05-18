@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: bench
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_INITDB_ARGS: --auth-host=md5
+    ports:
+      - "25432:5432"
+    command:
+      - postgres
+      - -c
+      - max_connections=400
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - password_encryption=md5
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bench -d bench"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.1-p0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://bench:bench@postgres:5432/bench
+      POOL_MODE: transaction
+      DEFAULT_POOL_SIZE: "64"
+      MAX_CLIENT_CONN: "10000"
+      IGNORE_STARTUP_PARAMETERS: extra_float_digits
+    ports:
+      - "26432:5432"
